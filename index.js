@@ -6,41 +6,67 @@ import bcrypt from "bcryptjs";
 
 dotenv.config();
 const { Pool } = pkg;
+
 const app = express();
 app.use(express.json());
 app.use(cors());
 
+// ============================================================
+// 🔧 Database connection
+// ============================================================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-// 🧩 LOGIN API (check username + password + ip)
+pool.connect()
+  .then(() => console.log("✅ Connected to PostgreSQL"))
+  .catch((err) => console.error("❌ Database connection failed:", err));
+
+// ============================================================
+// 🔐 LOGIN API
+// ============================================================
 app.post("/login", async (req, res) => {
   const { username, password, ip } = req.body;
 
+  console.log("📥 Login request:", username, ip);
+
+  if (!username || !password || !ip) {
+    return res.status(400).json({ success: false, message: "Missing fields" });
+  }
+
   try {
-    // 1️⃣ Tìm user theo username
-    const result = await pool.query("SELECT * FROM users WHERE username = $1", [username]);
+    // 1️⃣ Tìm user
+    const result = await pool.query("SELECT * FROM accounts WHERE username = $1", [username]);
     if (result.rows.length === 0) {
-      return res.status(400).json({ success: false, message: "User not found" });
+      console.warn("⚠️ User not found:", username);
+      return res.status(404).json({ success: false, message: "User not found" });
     }
 
     const user = result.rows[0];
 
-    // 2️⃣ So khớp password
-    const match = await bcrypt.compare(password, user.password);
-    if (!match) {
+    // 2️⃣ So khớp password (nếu hash thì compare, nếu không thì so trực tiếp)
+    let passwordMatch = false;
+    try {
+      passwordMatch = await bcrypt.compare(password, user.password);
+    } catch (e) {
+      passwordMatch = (password === user.password);
+    }
+
+    if (!passwordMatch) {
+      console.warn("⚠️ Invalid password for user:", username);
       return res.status(401).json({ success: false, message: "Invalid password" });
     }
 
-    // 3️⃣ Kiểm tra IP
+    // 3️⃣ Kiểm tra IP (nếu user có ip cụ thể trong DB)
     if (user.ip && user.ip !== ip) {
+      console.warn("⚠️ Invalid IP for user:", username, "Expected:", user.ip, "Got:", ip);
       return res.status(403).json({ success: false, message: "Invalid IP address" });
     }
 
-    // ✅ Login thành công
-    res.json({
+    // ✅ Thành công
+    console.log("✅ Login successful:", username);
+    return res.json({
       success: true,
       message: "Login successful",
       user: {
@@ -50,12 +76,13 @@ app.post("/login", async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("❌ Error:", err);
-    res.status(500).json({ success: false, message: "Server error" });
+    console.error("🔥 SERVER ERROR:", err);
+    return res.status(500).json({ success: false, message: "Server error", error: err.message });
   }
 });
 
-app.listen(process.env.PORT || 3000, () =>
-  console.log(`✅ Server running on port ${process.env.PORT || 3000}`)
-);
-
+// ============================================================
+// 🚀 Start server
+// ============================================================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
