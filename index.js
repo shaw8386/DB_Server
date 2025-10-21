@@ -12,7 +12,7 @@ app.use(express.json());
 app.use(cors());
 
 // ============================================================
-// 🔧 Database connection
+// 🔧 PostgreSQL Connection
 // ============================================================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -24,7 +24,7 @@ pool.connect()
   .catch((err) => console.error("❌ Database connection failed:", err));
 
 // ============================================================
-// 🔐 LOGIN API
+// 🔐 LOGIN API (bảng: accounts)
 // ============================================================
 app.post("/login", async (req, res) => {
   const { username, password, ip } = req.body;
@@ -36,7 +36,7 @@ app.post("/login", async (req, res) => {
   }
 
   try {
-    // 1️⃣ Tìm user
+    // 1️⃣ Tìm user trong bảng accounts
     const result = await pool.query("SELECT * FROM accounts WHERE username = $1", [username]);
     if (result.rows.length === 0) {
       console.warn("⚠️ User not found:", username);
@@ -49,18 +49,18 @@ app.post("/login", async (req, res) => {
     let passwordMatch = false;
     try {
       passwordMatch = await bcrypt.compare(password, user.password);
-    } catch (e) {
+    } catch {
       passwordMatch = (password === user.password);
     }
 
     if (!passwordMatch) {
-      console.warn("⚠️ Invalid password for user:", username);
+      console.warn("⚠️ Invalid password for:", username);
       return res.status(401).json({ success: false, message: "Invalid password" });
     }
 
-    // 3️⃣ Kiểm tra IP (nếu user có ip cụ thể trong DB)
+    // 3️⃣ Kiểm tra IP (nếu có trong DB)
     if (user.ip && user.ip !== ip) {
-      console.warn("⚠️ Invalid IP for user:", username, "Expected:", user.ip, "Got:", ip);
+      console.warn("⚠️ Invalid IP:", username, "Expected:", user.ip, "Got:", ip);
       return res.status(403).json({ success: false, message: "Invalid IP address" });
     }
 
