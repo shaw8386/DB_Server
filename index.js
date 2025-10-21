@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import pkg from "pg";
-import bcrypt from "bcrypt";
+import bcrypt from "bcryptjs";
 
 dotenv.config();
 const { Pool } = pkg;
@@ -58,3 +58,4 @@ app.post("/login", async (req, res) => {
 app.listen(process.env.PORT || 3000, () =>
   console.log(`✅ Server running on port ${process.env.PORT || 3000}`)
 );
+
