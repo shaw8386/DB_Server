@@ -9,7 +9,7 @@ dotenv.config();
 const { Pool } = pkg;
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json());
 app.use(cors());
 
 // ============================================================
@@ -26,54 +26,52 @@ pool
   .catch((err) => console.error("❌ Database connection failed:", err));
 
 // ============================================================
-// 🔐 API KEY MIDDLEWARE (NO JWT)
+// 🔐 API KEY middleware (x-api-key)
 // ============================================================
-const API_KEY = (process.env.API_KEY || "").trim();
-
 function requireApiKey(req, res, next) {
-  // Header chuẩn: x-api-key
-  const key = (req.headers["x-api-key"] || "").toString().trim();
-
-  if (!API_KEY) {
-    return res.status(500).json({ ok: false, message: "Server missing API_KEY (Railway Variables)" });
+  const serverKey = process.env.API_KEY;
+  if (!serverKey) {
+    return res.status(500).json({
+      ok: false,
+      message: "Server missing API_KEY (Railway Variables)",
+    });
   }
-  if (!key || key !== API_KEY) {
+
+  const clientKey = req.headers["x-api-key"];
+  if (!clientKey || clientKey !== serverKey) {
     return res.status(401).json({ ok: false, message: "Unauthorized" });
   }
   next();
 }
 
 // ============================================================
-// 🧱 INIT TABLE bot_tokens (AUTO CREATE ON START)
+// 🧱 Auto-migrate: create table bots
 // ============================================================
-async function initBotTokensTable() {
+async function ensureTables() {
   const sql = `
-  CREATE TABLE IF NOT EXISTS bot_tokens (
+  CREATE TABLE IF NOT EXISTS bots (
     id SERIAL PRIMARY KEY,
-    bot_ref TEXT UNIQUE NOT NULL,         -- cái user nhập ở DB local (telegram_config.bot_token)
-    bot_token TEXT NOT NULL,              -- token thật
+    client_key TEXT UNIQUE NOT NULL,     -- user nhập trong tool (telegram_config.bot_token)
+    bot_token TEXT NOT NULL,             -- token thật
     bot_id BIGINT,
     bot_username TEXT,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
   );
 
-  CREATE INDEX IF NOT EXISTS idx_bot_tokens_bot_ref ON bot_tokens(bot_ref);
+  CREATE INDEX IF NOT EXISTS idx_bots_client_key ON bots(client_key);
   `;
 
   await pool.query(sql);
-  console.log("✅ bot_tokens table ensured");
+  console.log("✅ ensureTables OK (bots)");
 }
 
-// ============================================================
-// ✅ HEALTH CHECK
-// ============================================================
-app.get("/health", (req, res) => {
-  res.json({ ok: true, service: "bcr-token-server", time: new Date().toISOString() });
+ensureTables().catch((err) => {
+  console.error("❌ ensureTables failed:", err);
 });
 
 // ============================================================
-// 🔐 LOGIN API (bảng: accounts)
+// 🔐 LOGIN API (bảng: accounts) - giữ nguyên như bạn
 // ============================================================
 app.post("/login", async (req, res) => {
   const { username, password, ip } = req.body;
@@ -127,99 +125,78 @@ app.post("/login", async (req, res) => {
 });
 
 // ============================================================
-// 🤖 BOT TOKEN APIs
+// ✅ TOOL API: Resolve token thật theo client_key
+// Tool gọi endpoint này để lấy bot_token thật.
+// Header: x-api-key: API_KEY
+// Body: { "client_key": "..." }
 // ============================================================
-
-/**
- * POST /bot/register  (BẢO TRÌ / ADMIN)
- * - Mục đích: bạn (admin) đẩy token thật lên server để lưu.
- * - Bắt buộc x-api-key
- * Body: { bot_ref, bot_token, bot_id?, bot_username? }
- *
- * Gợi ý: bot_ref chính là chuỗi user nhập ở local telegram_config.bot_token
- *        (ví dụ: "A01" hoặc "ref_group1" ...)
- */
-app.post("/bot/register", requireApiKey, async (req, res) => {
-  const { bot_ref, bot_token, bot_id, bot_username } = req.body || {};
-
-  if (!bot_ref || !bot_token) {
-    return res.status(400).json({ ok: false, message: "Missing bot_ref or bot_token" });
+app.post("/bot/resolve", requireApiKey, async (req, res) => {
+  const { client_key } = req.body || {};
+  if (!client_key) {
+    return res.status(400).json({ ok: false, message: "Missing client_key" });
   }
-  if (!String(bot_token).includes(":")) {
-    return res.status(400).json({ ok: false, message: "bot_token invalid format (missing ':')" });
+
+  try {
+    const r = await pool.query(
+      `SELECT bot_token, bot_id, bot_username
+       FROM bots
+       WHERE client_key = $1
+       LIMIT 1`,
+      [client_key]
+    );
+
+    if (r.rows.length === 0) {
+      return res.status(404).json({ ok: false, message: "Bot not found for this client_key" });
+    }
+
+    const bot = r.rows[0];
+    return res.json({
+      ok: true,
+      bot_token: bot.bot_token,
+      bot_id: bot.bot_id,
+      bot_username: bot.bot_username,
+    });
+  } catch (err) {
+    console.error("🔥 /bot/resolve error:", err);
+    return res.status(500).json({ ok: false, message: "Server error", error: err.message });
+  }
+});
+
+// ============================================================
+// ✅ ADMIN API: Upsert bot token (để bạn add/update token thật)
+// Header: x-api-key: API_KEY
+// Body: { client_key, bot_token, bot_id?, bot_username? }
+// ============================================================
+app.post("/bot/upsert", requireApiKey, async (req, res) => {
+  const { client_key, bot_token, bot_id, bot_username } = req.body || {};
+
+  if (!client_key || !bot_token) {
+    return res.status(400).json({ ok: false, message: "Missing client_key or bot_token" });
   }
 
   try {
     const q = `
-      INSERT INTO bot_tokens (bot_ref, bot_token, bot_id, bot_username, created_at, updated_at)
+      INSERT INTO bots (client_key, bot_token, bot_id, bot_username, created_at, updated_at)
       VALUES ($1, $2, $3, $4, NOW(), NOW())
-      ON CONFLICT (bot_ref)
+      ON CONFLICT (client_key)
       DO UPDATE SET
         bot_token = EXCLUDED.bot_token,
         bot_id = EXCLUDED.bot_id,
         bot_username = EXCLUDED.bot_username,
         updated_at = NOW()
-      RETURNING id, bot_ref, bot_id, bot_username, updated_at
+      RETURNING id, client_key, bot_id, bot_username, updated_at;
     `;
-    const r = await pool.query(q, [
-      String(bot_ref).trim(),
-      String(bot_token).trim(),
-      bot_id ?? null,
-      bot_username ?? null,
-    ]);
 
-    return res.json({ ok: true, data: r.rows[0] });
+    const r = await pool.query(q, [client_key, bot_token, bot_id || null, bot_username || null]);
+    return res.json({ ok: true, bot: r.rows[0] });
   } catch (err) {
-    console.error("🔥 /bot/register ERROR:", err);
-    return res.status(500).json({ ok: false, message: "Server error", error: err.message });
-  }
-});
-
-/**
- * POST /bot/resolve  (TOOL CALL)
- * - Mục đích: tool BCR gửi bot_ref (token user nhập) lên để lấy token thật.
- * - Bắt buộc x-api-key
- * Body: { bot_ref }
- * Response: { ok: true, bot_token, bot_id?, bot_username? }
- */
-app.post("/bot/resolve", requireApiKey, async (req, res) => {
-  const { bot_ref } = req.body || {};
-  if (!bot_ref) return res.status(400).json({ ok: false, message: "Missing bot_ref" });
-
-  try {
-    const r = await pool.query(
-      "SELECT bot_token, bot_id, bot_username FROM bot_tokens WHERE bot_ref = $1 LIMIT 1",
-      [String(bot_ref).trim()]
-    );
-
-    if (r.rows.length === 0) {
-      return res.status(404).json({ ok: false, message: "bot_ref not found" });
-    }
-
-    const row = r.rows[0];
-    return res.json({
-      ok: true,
-      bot_token: row.bot_token,
-      bot_id: row.bot_id,
-      bot_username: row.bot_username,
-    });
-  } catch (err) {
-    console.error("🔥 /bot/resolve ERROR:", err);
+    console.error("🔥 /bot/upsert error:", err);
     return res.status(500).json({ ok: false, message: "Server error", error: err.message });
   }
 });
 
 // ============================================================
-// 🚀 Start server (ensure tables first)
+// 🚀 Start server
 // ============================================================
 const PORT = process.env.PORT || 3000;
-
-(async () => {
-  try {
-    await initBotTokensTable();
-    app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
-  } catch (err) {
-    console.error("❌ Failed to init server:", err);
-    process.exit(1);
-  }
-})();
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
