@@ -1,4 +1,3 @@
-// index.js
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -20,58 +19,55 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-pool
-  .connect()
+pool.connect()
   .then(() => console.log("✅ Connected to PostgreSQL"))
   .catch((err) => console.error("❌ Database connection failed:", err));
 
 // ============================================================
-// 🔐 API KEY middleware (x-api-key)
+// 🔐 API KEY middleware
 // ============================================================
 function requireApiKey(req, res, next) {
-  const serverKey = process.env.API_KEY;
-  if (!serverKey) {
-    return res.status(500).json({
-      ok: false,
-      message: "Server missing API_KEY (Railway Variables)",
-    });
-  }
-
+  const serverKey = process.env.API_KEY; // Railway Variables: API_KEY
   const clientKey = req.headers["x-api-key"];
+
+  if (!serverKey) {
+    return res.status(500).json({ ok: false, message: "Server missing API_KEY (Railway Variables)" });
+  }
   if (!clientKey || clientKey !== serverKey) {
-    return res.status(401).json({ ok: false, message: "Unauthorized" });
+    return res.status(401).json({ ok: false, message: "Unauthorized (invalid x-api-key)" });
   }
   next();
 }
 
 // ============================================================
-// 🧱 Auto-migrate: create table bots
+// 🧱 Ensure table (singleton bot storage)
 // ============================================================
 async function ensureTables() {
   const sql = `
-  CREATE TABLE IF NOT EXISTS bots (
-    id SERIAL PRIMARY KEY,
-    client_key TEXT UNIQUE NOT NULL,     -- user nhập trong tool (telegram_config.bot_token)
-    bot_token TEXT NOT NULL,             -- token thật
+  CREATE TABLE IF NOT EXISTS bot_master (
+    id INT PRIMARY KEY DEFAULT 1,
+    bot_token TEXT NOT NULL,
     bot_id BIGINT,
     bot_username TEXT,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
   );
-
-  CREATE INDEX IF NOT EXISTS idx_bots_client_key ON bots(client_key);
   `;
-
   await pool.query(sql);
-  console.log("✅ ensureTables OK (bots)");
+  console.log("✅ ensureTables OK");
 }
 
-ensureTables().catch((err) => {
-  console.error("❌ ensureTables failed:", err);
+ensureTables().catch((e) => console.error("❌ ensureTables error:", e));
+
+// ============================================================
+// ✅ Health
+// ============================================================
+app.get("/health", (req, res) => {
+  res.json({ ok: true, ts: new Date().toISOString() });
 });
 
 // ============================================================
-// 🔐 LOGIN API (bảng: accounts) - giữ nguyên như bạn
+// 🔐 LOGIN API (bảng: accounts) - giữ nguyên của bạn
 // ============================================================
 app.post("/login", async (req, res) => {
   const { username, password, ip } = req.body;
@@ -95,7 +91,7 @@ app.post("/login", async (req, res) => {
     try {
       passwordMatch = await bcrypt.compare(password, user.password);
     } catch {
-      passwordMatch = password === user.password;
+      passwordMatch = (password === user.password);
     }
 
     if (!passwordMatch) {
@@ -125,31 +121,22 @@ app.post("/login", async (req, res) => {
 });
 
 // ============================================================
-// ✅ TOOL API: Resolve token thật theo client_key
-// Tool gọi endpoint này để lấy bot_token thật.
-// Header: x-api-key: API_KEY
-// Body: { "client_key": "..." }
+// ✅ BOT: RESOLVE (Tool gọi để lấy bot_token thật)
+// POST /bot/resolve
+// Header: x-api-key
+// Response: { ok: true, bot_token, bot_id, bot_username }
 // ============================================================
 app.post("/bot/resolve", requireApiKey, async (req, res) => {
-  const { client_key } = req.body || {};
-  if (!client_key) {
-    return res.status(400).json({ ok: false, message: "Missing client_key" });
-  }
-
   try {
-    const r = await pool.query(
-      `SELECT bot_token, bot_id, bot_username
-       FROM bots
-       WHERE client_key = $1
-       LIMIT 1`,
-      [client_key]
+    const rs = await pool.query(
+      "SELECT bot_token, bot_id, bot_username FROM bot_master WHERE id = 1 LIMIT 1"
     );
 
-    if (r.rows.length === 0) {
-      return res.status(404).json({ ok: false, message: "Bot not found for this client_key" });
+    if (rs.rows.length === 0) {
+      return res.status(404).json({ ok: false, message: "Bot token not set on server yet" });
     }
 
-    const bot = r.rows[0];
+    const bot = rs.rows[0];
     return res.json({
       ok: true,
       bot_token: bot.bot_token,
@@ -163,32 +150,37 @@ app.post("/bot/resolve", requireApiKey, async (req, res) => {
 });
 
 // ============================================================
-// ✅ ADMIN API: Upsert bot token (để bạn add/update token thật)
-// Header: x-api-key: API_KEY
-// Body: { client_key, bot_token, bot_id?, bot_username? }
+// ✅ BOT: UPSERT (Admin cập nhật token thật)
+// POST /bot/upsert
+// Header: x-api-key
+// Body: { bot_token, bot_id?, bot_username? }
 // ============================================================
 app.post("/bot/upsert", requireApiKey, async (req, res) => {
-  const { client_key, bot_token, bot_id, bot_username } = req.body || {};
+  const { bot_token, bot_id, bot_username } = req.body || {};
 
-  if (!client_key || !bot_token) {
-    return res.status(400).json({ ok: false, message: "Missing client_key or bot_token" });
+  if (!bot_token || typeof bot_token !== "string" || !bot_token.includes(":")) {
+    return res.status(400).json({ ok: false, message: "bot_token invalid (must contain ':')" });
   }
 
   try {
-    const q = `
-      INSERT INTO bots (client_key, bot_token, bot_id, bot_username, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, NOW(), NOW())
-      ON CONFLICT (client_key)
+    await pool.query(
+      `
+      INSERT INTO bot_master (id, bot_token, bot_id, bot_username)
+      VALUES (1, $1, $2, $3)
+      ON CONFLICT (id)
       DO UPDATE SET
         bot_token = EXCLUDED.bot_token,
         bot_id = EXCLUDED.bot_id,
         bot_username = EXCLUDED.bot_username,
         updated_at = NOW()
-      RETURNING id, client_key, bot_id, bot_username, updated_at;
-    `;
+      `,
+      [bot_token, bot_id || null, bot_username || null]
+    );
 
-    const r = await pool.query(q, [client_key, bot_token, bot_id || null, bot_username || null]);
-    return res.json({ ok: true, bot: r.rows[0] });
+    return res.json({
+      ok: true,
+      message: "Bot token updated",
+    });
   } catch (err) {
     console.error("🔥 /bot/upsert error:", err);
     return res.status(500).json({ ok: false, message: "Server error", error: err.message });
