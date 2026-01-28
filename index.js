@@ -40,10 +40,13 @@ function requireApiKey(req, res, next) {
 }
 
 // ============================================================
-// 🧱 Ensure table (multi-bot storage, keyed by user_bot / USER_BOT)
+// 🧱 Ensure tables
+//  - bot_master: multi-bot storage (keyed by user_bot / USER_BOT)
+//  - accounts_tool_bcr: login accounts for Tool BCR (plain-text, giống index_login.js)
 // ============================================================
 async function ensureTables() {
-  const sql = `
+  // ---- bot_master (multi-bot) ----
+  const sqlBot = `
   CREATE TABLE IF NOT EXISTS bot_master (
     id INT PRIMARY KEY DEFAULT 1,
     -- USER_BOT mà tool gửi lên để xác định đúng bot
@@ -55,7 +58,7 @@ async function ensureTables() {
     updated_at TIMESTAMP DEFAULT NOW()
   );
   `;
-  await pool.query(sql);
+  await pool.query(sqlBot);
 
   // Bổ sung cột / index trong trường hợp table đã tồn tại từ version cũ (single bot)
   await pool.query(`
@@ -71,6 +74,20 @@ async function ensureTables() {
   `);
 
   console.log("✅ ensureTables OK (multi-bot ready)");
+
+  // ---- accounts_tool_bcr (login giống index_login.js) ----
+  const sqlAccounts = `
+  CREATE TABLE IF NOT EXISTS accounts_tool_bcr (
+    id SERIAL PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL, -- PLAIN TEXT (giống index_login.js)
+    ip_address TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+  `;
+  await pool.query(sqlAccounts);
+
+  console.log("✅ accounts_tool_bcr table ready");
 }
 
 ensureTables().catch((e) => console.error("❌ ensureTables error:", e));
@@ -83,12 +100,12 @@ app.get("/health", (req, res) => {
 });
 
 // ============================================================
-// 🔐 LOGIN API (bảng: accounts) - giữ nguyên của bạn
+// 🔐 LOGIN API cũ (bảng: accounts) – giữ nguyên cho các client đang dùng
 // ============================================================
 app.post("/login", async (req, res) => {
   const { username, password, ip } = req.body;
 
-  console.log("📥 Login request:", username, ip);
+  console.log("📥 Login request (accounts):", username, ip);
 
   if (!username || !password || !ip) {
     return res.status(400).json({ success: false, message: "Missing fields" });
@@ -107,7 +124,7 @@ app.post("/login", async (req, res) => {
     try {
       passwordMatch = await bcrypt.compare(password, user.password);
     } catch {
-      passwordMatch = (password === user.password);
+      passwordMatch = password === user.password;
     }
 
     if (!passwordMatch) {
@@ -120,7 +137,7 @@ app.post("/login", async (req, res) => {
       return res.status(403).json({ success: false, message: "Invalid IP address" });
     }
 
-    console.log("✅ Login successful:", username);
+    console.log("✅ Login successful (accounts):", username);
     return res.json({
       success: true,
       message: "Login successful",
@@ -133,6 +150,126 @@ app.post("/login", async (req, res) => {
   } catch (err) {
     console.error("🔥 SERVER ERROR:", err);
     return res.status(500).json({ success: false, message: "Server error", error: err.message });
+  }
+});
+
+// ============================================================
+// 🔐 LOGIN API mới cho Tool BCR (bảng: accounts_tool_bcr)
+//   - Logic & cấu trúc giống index_login.js nhưng dùng bảng riêng
+//   - PLAIN TEXT PASSWORD + check IP theo ip_address
+// ============================================================
+app.post("/api/login", async (req, res) => {
+  try {
+    const { username, password, ip } = req.body;
+
+    if (!username || !password || !ip) {
+      return res.status(400).json({
+        success: false,
+        message: "Thiếu username / password / ip",
+      });
+    }
+
+    const result = await pool.query(
+      "SELECT id, username, password FROM accounts_tool_bcr WHERE username = $1 AND ip_address = $2",
+      [username, ip]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(403).json({
+        success: false,
+        message: "Username hoặc IP không hợp lệ",
+      });
+    }
+
+    const user = result.rows[0];
+
+    // PLAIN TEXT COMPARE (giống index_login.js)
+    if (password !== user.password) {
+      return res.status(401).json({
+        success: false,
+        message: "Sai mật khẩu",
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Đăng nhập thành công",
+      user: {
+        id: user.id,
+        username: user.username,
+      },
+    });
+  } catch (err) {
+    console.error("🔥 /api/login error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Lỗi server",
+    });
+  }
+});
+
+// ============================================================
+// 👑 Admin - Add User cho Tool BCR (bảng: accounts_tool_bcr)
+//   POST /api/admin/add-user
+//   Body: { username, password, ip_address }
+// ============================================================
+app.post("/api/admin/add-user", async (req, res) => {
+  try {
+    const { username, password, ip_address } = req.body;
+
+    if (!username || !password || !ip_address) {
+      return res.status(400).json({
+        success: false,
+        message: "Thiếu dữ liệu",
+      });
+    }
+
+    const result = await pool.query(
+      "INSERT INTO accounts_tool_bcr (username, password, ip_address) VALUES ($1, $2, $3) RETURNING id",
+      [username, password, ip_address]
+    );
+
+    return res.json({
+      success: true,
+      message: "Thêm user thành công",
+      userId: result.rows[0].id,
+    });
+  } catch (err) {
+    if (err.code === "23505") {
+      return res.status(409).json({
+        success: false,
+        message: "Username đã tồn tại",
+      });
+    }
+
+    console.error("🔥 /api/admin/add-user error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Lỗi server",
+    });
+  }
+});
+
+// ============================================================
+// 👑 Admin - List Users cho Tool BCR (bảng: accounts_tool_bcr)
+//   GET /api/admin/users
+// ============================================================
+app.get("/api/admin/users", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT id, username, password, ip_address, created_at FROM accounts_tool_bcr ORDER BY id DESC"
+    );
+
+    return res.json({
+      success: true,
+      users: result.rows,
+    });
+  } catch (err) {
+    console.error("🔥 /api/admin/users error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Lỗi server",
+    });
   }
 });
 
