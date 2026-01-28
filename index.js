@@ -40,12 +40,14 @@ function requireApiKey(req, res, next) {
 }
 
 // ============================================================
-// 🧱 Ensure table (singleton bot storage)
+// 🧱 Ensure table (multi-bot storage, keyed by user_bot / USER_BOT)
 // ============================================================
 async function ensureTables() {
   const sql = `
   CREATE TABLE IF NOT EXISTS bot_master (
     id INT PRIMARY KEY DEFAULT 1,
+    -- USER_BOT mà tool gửi lên để xác định đúng bot
+    user_bot TEXT,
     bot_token TEXT NOT NULL,
     bot_id BIGINT,
     bot_username TEXT,
@@ -54,7 +56,21 @@ async function ensureTables() {
   );
   `;
   await pool.query(sql);
-  console.log("✅ ensureTables OK");
+
+  // Bổ sung cột / index trong trường hợp table đã tồn tại từ version cũ (single bot)
+  await pool.query(`
+    ALTER TABLE bot_master
+    ADD COLUMN IF NOT EXISTS user_bot TEXT
+  `);
+
+  // Đảm bảo mỗi USER_BOT là duy nhất (multi-bot)
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_master_user_bot
+    ON bot_master(user_bot)
+    WHERE user_bot IS NOT NULL
+  `);
+
+  console.log("✅ ensureTables OK (multi-bot ready)");
 }
 
 ensureTables().catch((e) => console.error("❌ ensureTables error:", e));
@@ -121,19 +137,35 @@ app.post("/login", async (req, res) => {
 });
 
 // ============================================================
-// ✅ BOT: RESOLVE (Tool gọi để lấy bot_token thật)
+// ✅ BOT: RESOLVE (Tool gọi để lấy bot_token thật theo USER_BOT)
 // POST /bot/resolve
 // Header: x-api-key
+// Body: { user_bot }  // USER_BOT mà tool nhập trong Telegram_config
 // Response: { ok: true, bot_token, bot_id, bot_username }
 // ============================================================
 app.post("/bot/resolve", requireApiKey, async (req, res) => {
+  const { user_bot } = req.body || {};
+
+  if (!user_bot || typeof user_bot !== "string") {
+    return res.status(400).json({ ok: false, message: "Missing or invalid user_bot" });
+  }
+
   try {
     const rs = await pool.query(
-      "SELECT bot_token, bot_id, bot_username FROM bot_master WHERE id = 1 LIMIT 1"
+      `
+      SELECT bot_token, bot_id, bot_username
+      FROM bot_master
+      WHERE user_bot = $1
+      LIMIT 1
+      `,
+      [user_bot]
     );
 
     if (rs.rows.length === 0) {
-      return res.status(404).json({ ok: false, message: "Bot token not set on server yet" });
+      return res.status(404).json({
+        ok: false,
+        message: "Bot token not found for this USER_BOT",
+      });
     }
 
     const bot = rs.rows[0];
@@ -150,13 +182,17 @@ app.post("/bot/resolve", requireApiKey, async (req, res) => {
 });
 
 // ============================================================
-// ✅ BOT: UPSERT (Admin cập nhật token thật)
+// ✅ BOT: UPSERT (Admin cập nhật token thật cho từng USER_BOT)
 // POST /bot/upsert
 // Header: x-api-key
-// Body: { bot_token, bot_id?, bot_username? }
+// Body: { user_bot, bot_token, bot_id?, bot_username? }
 // ============================================================
 app.post("/bot/upsert", requireApiKey, async (req, res) => {
-  const { bot_token, bot_id, bot_username } = req.body || {};
+  const { user_bot, bot_token, bot_id, bot_username } = req.body || {};
+
+  if (!user_bot || typeof user_bot !== "string") {
+    return res.status(400).json({ ok: false, message: "user_bot required" });
+  }
 
   if (!bot_token || typeof bot_token !== "string" || !bot_token.includes(":")) {
     return res.status(400).json({ ok: false, message: "bot_token invalid (must contain ':')" });
@@ -165,21 +201,21 @@ app.post("/bot/upsert", requireApiKey, async (req, res) => {
   try {
     await pool.query(
       `
-      INSERT INTO bot_master (id, bot_token, bot_id, bot_username)
-      VALUES (1, $1, $2, $3)
-      ON CONFLICT (id)
+      INSERT INTO bot_master (user_bot, bot_token, bot_id, bot_username)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (user_bot)
       DO UPDATE SET
         bot_token = EXCLUDED.bot_token,
         bot_id = EXCLUDED.bot_id,
         bot_username = EXCLUDED.bot_username,
         updated_at = NOW()
       `,
-      [bot_token, bot_id || null, bot_username || null]
+      [user_bot, bot_token, bot_id || null, bot_username || null]
     );
 
     return res.json({
       ok: true,
-      message: "Bot token updated",
+      message: "Bot token updated for USER_BOT",
     });
   } catch (err) {
     console.error("🔥 /bot/upsert error:", err);
