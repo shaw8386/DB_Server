@@ -366,7 +366,45 @@ app.post("/bot/upsert", requireApiKey, async (req, res) => {
 });
 
 // ============================================================
-// 📥 DB SYNC: Download (lấy DB từ server, Tool gọi khi khởi động)
+// 📥 SESSION_DB: Export (lấy toàn bộ data schema session_db dạng JSON)
+// GET /api/session-db/export
+// Header: x-api-key
+// Returns: { ok, data: { telegram_config, list_mess, msg_type, session, table_, round, ... } }
+// ============================================================
+const SESSION_DB_TABLES = [
+  { key: "telegram_config", pg: "tool_telegram_config", cols: "id,telegram_username,telegram_uid,group_list_flag as \"groupList_flag\",bot_username,bot_token,main_amount,tie_min,tie_max,tie_step,label_player,label_banker,label_tie,updated_at" },
+  { key: "list_mess", pg: "tool_list_mess", cols: "*" },
+  { key: "msg_type", pg: "tool_msg_type", cols: "*" },
+  { key: "session", pg: "tool_session", cols: "*" },
+  { key: "table_", pg: "tool_table", cols: "*" },
+  { key: "round", pg: "tool_round", cols: "*" },
+  { key: "round_entries", pg: "tool_round_entries", cols: "id,id_round,role,tab,group_list_flag as \"groupList_flag\",predict_select,media_result" },
+  { key: "round_bet", pg: "tool_round_bet", cols: "*" },
+  { key: "round_result", pg: "tool_round_result", cols: "*" },
+  { key: "msg_send", pg: "tool_msg_send", cols: "*" },
+];
+
+app.get("/api/session-db/export", requireApiKey, async (req, res) => {
+  try {
+    const data = {};
+    for (const t of SESSION_DB_TABLES) {
+      try {
+        const rs = await pool.query(`SELECT ${t.cols} FROM session_db.${t.pg} ORDER BY id`);
+        data[t.key] = rs.rows;
+      } catch (e) {
+        if (e.code === "42P01") data[t.key] = [];
+        else throw e;
+      }
+    }
+    return res.json({ ok: true, data });
+  } catch (err) {
+    console.error("🔥 /api/session-db/export error:", err);
+    return res.status(500).json({ ok: false, message: "Server error", error: err.message });
+  }
+});
+
+// ============================================================
+// 📥 DB SYNC: Download (lấy SQLite blob từ tool_db_backups, fallback)
 // GET /api/db/download
 // Header: x-api-key
 // Returns: application/octet-stream (SQLite file) hoặc 404 nếu chưa có backup
