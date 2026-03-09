@@ -388,13 +388,18 @@ app.get("/api/session-db/export", requireApiKey, async (req, res) => {
   try {
     const data = {};
     for (const t of SESSION_DB_TABLES) {
-      try {
-        const rs = await pool.query(`SELECT ${t.cols} FROM session_db.${t.pg} ORDER BY id`);
-        data[t.key] = rs.rows;
-      } catch (e) {
-        if (e.code === "42P01") data[t.key] = [];
-        else throw e;
-      }
+        try {
+          const baseSql = `SELECT ${t.cols} FROM session_db.${t.pg}`;
+          const sql =
+            t.key === "msg_type"
+              ? baseSql                   // không ORDER BY
+              : `${baseSql} ORDER BY id`; // các bảng khác vẫn dùng id
+          const rs = await pool.query(sql);
+          data[t.key] = rs.rows;
+        } catch (e) {
+          if (e.code === "42P01") data[t.key] = [];
+          else throw e;
+        }
     }
     return res.json({ ok: true, data });
   } catch (err) {
