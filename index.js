@@ -40,14 +40,17 @@ function requireApiKey(req, res, next) {
 }
 
 // ============================================================
-// 🧱 Ensure tables
-//  - bot_master: multi-bot storage (key = bot_username, chuẩn Railway)
-//  - accounts_tool_bcr: login accounts for Tool BCR (plain-text, giống index_login.js)
+// 🧱 Schemas & Ensure tables
+//  - accounts: accounts, accounts_tool_bcr, bot_master
+//  - session_db: tool_db_backups
 // ============================================================
 async function ensureTables() {
-  // ---- bot_master (multi-bot, key = bot_username) ----
+  await pool.query("CREATE SCHEMA IF NOT EXISTS accounts");
+  await pool.query("CREATE SCHEMA IF NOT EXISTS session_db");
+
+  // ---- accounts.bot_master (multi-bot, key = bot_username) ----
   const sqlBot = `
-  CREATE TABLE IF NOT EXISTS bot_master (
+  CREATE TABLE IF NOT EXISTS accounts.bot_master (
     id SERIAL PRIMARY KEY,
     bot_token TEXT NOT NULL,
     bot_id BIGINT,
@@ -61,15 +64,15 @@ async function ensureTables() {
   // Đảm bảo bot_username unique (Railway DB lưu theo bot_username)
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_master_bot_username
-    ON bot_master(bot_username)
+    ON accounts.bot_master(bot_username)
     WHERE bot_username IS NOT NULL
   `);
 
   console.log("✅ ensureTables OK (bot_master key = bot_username)");
 
-  // ---- accounts_tool_bcr (login giống index_login.js) ----
+  // ---- accounts.accounts_tool_bcr (login giống index_login.js) ----
   const sqlAccounts = `
-  CREATE TABLE IF NOT EXISTS accounts_tool_bcr (
+  CREATE TABLE IF NOT EXISTS accounts.accounts_tool_bcr (
     id SERIAL PRIMARY KEY,
     username TEXT UNIQUE NOT NULL,
     password TEXT NOT NULL, -- PLAIN TEXT (giống index_login.js)
@@ -79,9 +82,9 @@ async function ensureTables() {
   `;
   await pool.query(sqlAccounts);
 
-  // ---- tool_db_backups: lưu SQLite snapshot từ Tool BCR (admin theo dõi) ----
+  // ---- session_db.tool_db_backups: lưu SQLite snapshot từ Tool BCR ----
   const sqlToolDb = `
-  CREATE TABLE IF NOT EXISTS tool_db_backups (
+  CREATE TABLE IF NOT EXISTS session_db.tool_db_backups (
     id SERIAL PRIMARY KEY,
     data BYTEA NOT NULL,
     username TEXT,
@@ -115,7 +118,7 @@ app.post("/login", async (req, res) => {
   }
 
   try {
-    const result = await pool.query("SELECT * FROM accounts WHERE username = $1", [username]);
+    const result = await pool.query("SELECT * FROM accounts.accounts WHERE username = $1", [username]);
     if (result.rows.length === 0) {
       console.warn("⚠️ User not found:", username);
       return res.status(404).json({ success: false, message: "User not found" });
@@ -173,7 +176,7 @@ app.post("/api/login", async (req, res) => {
     }
 
     const result = await pool.query(
-      "SELECT id, username, password FROM accounts_tool_bcr WHERE username = $1 AND ip_address = $2",
+      "SELECT id, username, password FROM accounts.accounts_tool_bcr WHERE username = $1 AND ip_address = $2",
       [username, ip]
     );
 
@@ -228,7 +231,7 @@ app.post("/api/admin/add-user", async (req, res) => {
     }
 
     const result = await pool.query(
-      "INSERT INTO accounts_tool_bcr (username, password, ip_address) VALUES ($1, $2, $3) RETURNING id",
+      "INSERT INTO accounts.accounts_tool_bcr (username, password, ip_address) VALUES ($1, $2, $3) RETURNING id",
       [username, password, ip_address]
     );
 
@@ -260,7 +263,7 @@ app.post("/api/admin/add-user", async (req, res) => {
 app.get("/api/admin/users", async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT id, username, password, ip_address, created_at FROM accounts_tool_bcr ORDER BY id DESC"
+      "SELECT id, username, password, ip_address, created_at FROM accounts.accounts_tool_bcr ORDER BY id DESC"
     );
 
     return res.json({
@@ -294,7 +297,7 @@ app.post("/bot/resolve", requireApiKey, async (req, res) => {
     const rs = await pool.query(
       `
       SELECT bot_token, bot_id, bot_username
-      FROM bot_master
+      FROM accounts.bot_master
       WHERE bot_username = $1
       LIMIT 1
       `,
@@ -341,7 +344,7 @@ app.post("/bot/upsert", requireApiKey, async (req, res) => {
   try {
     await pool.query(
       `
-      INSERT INTO bot_master (bot_username, bot_token, bot_id)
+      INSERT INTO accounts.bot_master (bot_username, bot_token, bot_id)
       VALUES ($1, $2, $3)
       ON CONFLICT (bot_username)
       DO UPDATE SET
@@ -371,7 +374,7 @@ app.post("/bot/upsert", requireApiKey, async (req, res) => {
 app.get("/api/db/download", requireApiKey, async (req, res) => {
   try {
     const rs = await pool.query(
-      "SELECT data FROM tool_db_backups ORDER BY id DESC LIMIT 1"
+      "SELECT data FROM session_db.tool_db_backups ORDER BY id DESC LIMIT 1"
     );
     if (rs.rows.length === 0 || !rs.rows[0].data) {
       return res.status(404).json({
@@ -413,7 +416,7 @@ app.post("/api/db/upload", requireApiKey, async (req, res) => {
       return res.status(400).json({ ok: false, message: "Dữ liệu rỗng" });
     }
     await pool.query(
-      "INSERT INTO tool_db_backups (data, username) VALUES ($1, $2)",
+      "INSERT INTO session_db.tool_db_backups (data, username) VALUES ($1, $2)",
       [data, req.body.username || null]
     );
     return res.json({
