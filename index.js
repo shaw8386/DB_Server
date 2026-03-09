@@ -437,7 +437,64 @@ app.get("/api/db/download", requireApiKey, async (req, res) => {
 });
 
 // ============================================================
-// 📤 DB SYNC: Upload (đẩy DB lên server khi kết thúc ca)
+// 📤 SESSION_DB: Import (cập nhật session_db từ Tool khi xuống ca)
+// POST /api/session-db/import
+// Header: x-api-key, Content-Type: application/json
+// Body: { data: { telegram_config: [...], list_mess: [...], ... } }
+// ============================================================
+app.post("/api/session-db/import", requireApiKey, async (req, res) => {
+  try {
+    const payload = req.body && req.body.data;
+    if (!payload || typeof payload !== "object") {
+      return res.status(400).json({ ok: false, message: "Thiếu body.data (object)" });
+    }
+
+    const tablesToImport = [
+      { key: "telegram_config", pg: "tool_telegram_config" },
+      { key: "list_mess", pg: "tool_list_mess" },
+      { key: "msg_type", pg: "tool_msg_type" },
+      { key: "session", pg: "tool_session" },
+      { key: "table_", pg: "tool_table" },
+      { key: "round", pg: "tool_round" },
+      { key: "round_entries", pg: "tool_round_entries" },
+      { key: "round_bet", pg: "tool_round_bet" },
+      { key: "round_result", pg: "tool_round_result" },
+      { key: "msg_send", pg: "tool_msg_send" }
+    ];
+
+    await pool.query(`
+      TRUNCATE session_db.tool_msg_send, session_db.tool_round_result, session_db.tool_round_bet,
+        session_db.tool_round_entries, session_db.tool_round, session_db.tool_table,
+        session_db.tool_session, session_db.tool_msg_type, session_db.tool_list_mess,
+        session_db.tool_telegram_config CASCADE
+    `);
+
+    for (const { key, pg } of tablesToImport) {
+      const rows = payload[key] || [];
+      if (rows.length === 0) continue;
+
+      const rawCols = Object.keys(rows[0]);
+      const pgCols = rawCols.map((c) => (c === "groupList_flag" ? "group_list_flag" : c));
+      const colList = pgCols.map((c) => `"${c}"`).join(", ");
+      const placeholders = pgCols.map((_, i) => "$" + (i + 1)).join(", ");
+
+      for (const row of rows) {
+        const vals = rawCols.map((c) => row[c]);
+        await pool.query(
+          `INSERT INTO session_db.${pg} (${colList}) VALUES (${placeholders})`,
+          vals
+        );
+      }
+    }
+    return res.json({ ok: true, message: "Đã cập nhật session_db" });
+  } catch (err) {
+    console.error("🔥 /api/session-db/import error:", err);
+    return res.status(500).json({ ok: false, message: "Server error", error: err.message });
+  }
+});
+
+// ============================================================
+// 📤 DB SYNC: Upload (đẩy SQLite blob vào tool_db_backups)
 // POST /api/db/upload
 // Header: x-api-key, Content-Type: application/json
 // Body: { "data": "<base64 sqlite>" } hoặc raw binary
