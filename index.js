@@ -79,7 +79,18 @@ async function ensureTables() {
   `;
   await pool.query(sqlAccounts);
 
-  console.log("✅ accounts_tool_bcr table ready");
+  // ---- tool_db_backups: lưu SQLite snapshot từ Tool BCR (admin theo dõi) ----
+  const sqlToolDb = `
+  CREATE TABLE IF NOT EXISTS tool_db_backups (
+    id SERIAL PRIMARY KEY,
+    data BYTEA NOT NULL,
+    username TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+  `;
+  await pool.query(sqlToolDb);
+
+  console.log("✅ accounts_tool_bcr, tool_db_backups ready");
 }
 
 ensureTables().catch((e) => console.error("❌ ensureTables error:", e));
@@ -347,6 +358,70 @@ app.post("/bot/upsert", requireApiKey, async (req, res) => {
     });
   } catch (err) {
     console.error("🔥 /bot/upsert error:", err);
+    return res.status(500).json({ ok: false, message: "Server error", error: err.message });
+  }
+});
+
+// ============================================================
+// 📥 DB SYNC: Download (lấy DB từ server, Tool gọi khi khởi động)
+// GET /api/db/download
+// Header: x-api-key
+// Returns: application/octet-stream (SQLite file) hoặc 404 nếu chưa có backup
+// ============================================================
+app.get("/api/db/download", requireApiKey, async (req, res) => {
+  try {
+    const rs = await pool.query(
+      "SELECT data FROM tool_db_backups ORDER BY id DESC LIMIT 1"
+    );
+    if (rs.rows.length === 0 || !rs.rows[0].data) {
+      return res.status(404).json({
+        ok: false,
+        message: "Chưa có dữ liệu DB trên server",
+      });
+    }
+    const buf = Buffer.from(rs.rows[0].data);
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Disposition", "attachment; filename=master.db");
+    res.setHeader("Content-Length", buf.length);
+    res.send(buf);
+  } catch (err) {
+    console.error("🔥 /api/db/download error:", err);
+    return res.status(500).json({ ok: false, message: "Server error", error: err.message });
+  }
+});
+
+// ============================================================
+// 📤 DB SYNC: Upload (đẩy DB lên server khi kết thúc ca)
+// POST /api/db/upload
+// Header: x-api-key, Content-Type: application/json
+// Body: { "data": "<base64 sqlite>" } hoặc raw binary
+// ============================================================
+app.post("/api/db/upload", requireApiKey, async (req, res) => {
+  try {
+    let data;
+    if (req.body && typeof req.body.data === "string") {
+      data = Buffer.from(req.body.data, "base64");
+    } else if (Buffer.isBuffer(req.body)) {
+      data = req.body;
+    } else {
+      return res.status(400).json({
+        ok: false,
+        message: "Thiếu body.data (base64 SQLite) hoặc raw binary",
+      });
+    }
+    if (!data || data.length === 0) {
+      return res.status(400).json({ ok: false, message: "Dữ liệu rỗng" });
+    }
+    await pool.query(
+      "INSERT INTO tool_db_backups (data, username) VALUES ($1, $2)",
+      [data, req.body.username || null]
+    );
+    return res.json({
+      ok: true,
+      message: "Đã lưu DB lên server",
+    });
+  } catch (err) {
+    console.error("🔥 /api/db/upload error:", err);
     return res.status(500).json({ ok: false, message: "Server error", error: err.message });
   }
 });
