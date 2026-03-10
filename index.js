@@ -93,7 +93,97 @@ async function ensureTables() {
   `;
   await pool.query(sqlToolDb);
 
-  console.log("✅ accounts_tool_bcr, tool_db_backups ready");
+  // ---- session_db: các bảng Tool BCR sync từ master.db ----
+  const sessionTables = [
+    `CREATE TABLE IF NOT EXISTS session_db.tool_telegram_config (
+      id SERIAL PRIMARY KEY,
+      telegram_username TEXT,
+      telegram_uid TEXT,
+      group_list_flag INTEGER,
+      bot_username TEXT,
+      bot_token TEXT,
+      main_amount INTEGER DEFAULT 0,
+      tie_min INTEGER DEFAULT 0,
+      tie_max INTEGER DEFAULT 0,
+      tie_step INTEGER DEFAULT 0,
+      label_player TEXT,
+      label_banker TEXT,
+      label_tie TEXT,
+      updated_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS session_db.tool_list_mess (
+      id SERIAL PRIMARY KEY,
+      msg_type TEXT,
+      message TEXT,
+      pair_key TEXT,
+      pair_role TEXT,
+      updated_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS session_db.tool_msg_type (
+      msg_type TEXT PRIMARY KEY,
+      description TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS session_db.tool_session (
+      id SERIAL PRIMARY KEY,
+      start TEXT,
+      end TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS session_db.tool_table (
+      id SERIAL PRIMARY KEY,
+      id_session INTEGER,
+      type TEXT,
+      name TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS session_db.tool_round (
+      id SERIAL PRIMARY KEY,
+      id_table INTEGER,
+      round_no INTEGER,
+      focus_tab INTEGER,
+      focus_group INTEGER,
+      tie_sub TEXT,
+      result TEXT,
+      updated_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS session_db.tool_round_entries (
+      id SERIAL PRIMARY KEY,
+      id_round INTEGER,
+      role TEXT,
+      tab INTEGER,
+      group_list_flag INTEGER,
+      predict_select TEXT,
+      media_result TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS session_db.tool_round_bet (
+      id SERIAL PRIMARY KEY,
+      id_round_entries INTEGER,
+      id_telegram_config INTEGER,
+      telegram_uid INTEGER,
+      bot_token TEXT,
+      label_predict_select TEXT,
+      main_amount INTEGER,
+      tie_sub_amount INTEGER,
+      msg_predict TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS session_db.tool_round_result (
+      id SERIAL PRIMARY KEY,
+      id_round_bet INTEGER,
+      profit_main INTEGER,
+      profit_tie_sub INTEGER,
+      msg_result TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS session_db.tool_msg_send (
+      id SERIAL PRIMARY KEY,
+      id_telegram_config INTEGER,
+      msg_type TEXT,
+      msg_text TEXT,
+      updated_at TEXT
+    )`,
+  ];
+  for (const sql of sessionTables) {
+    await pool.query(sql);
+  }
+
+  console.log("✅ accounts_tool_bcr, tool_db_backups, session_db tables ready");
 }
 
 ensureTables().catch((e) => console.error("❌ ensureTables error:", e));
@@ -449,6 +539,14 @@ app.post("/api/session-db/import", requireApiKey, async (req, res) => {
       return res.status(400).json({ ok: false, message: "Thiếu body.data (object)" });
     }
 
+    // Debug: log received row counts
+    const counts = {};
+    for (const k of Object.keys(payload)) {
+      const arr = payload[k];
+      counts[k] = Array.isArray(arr) ? arr.length : 0;
+    }
+    console.log("📥 session-db/import received:", counts);
+
     const tablesToImport = [
       { key: "telegram_config", pg: "tool_telegram_config" },
       { key: "list_mess", pg: "tool_list_mess" },
@@ -469,6 +567,7 @@ app.post("/api/session-db/import", requireApiKey, async (req, res) => {
         session_db.tool_telegram_config CASCADE
     `);
 
+    let inserted = {};
     for (const { key, pg } of tablesToImport) {
       const rows = payload[key] || [];
       if (rows.length === 0) continue;
@@ -485,7 +584,9 @@ app.post("/api/session-db/import", requireApiKey, async (req, res) => {
           vals
         );
       }
+      inserted[pg] = rows.length;
     }
+    console.log("✅ session-db/import inserted:", inserted);
     return res.json({ ok: true, message: "Đã cập nhật session_db" });
   } catch (err) {
     console.error("🔥 /api/session-db/import error:", err);
