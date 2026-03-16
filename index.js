@@ -126,7 +126,7 @@ async function ensureTables() {
     `CREATE TABLE IF NOT EXISTS session_db.tool_session (
       id SERIAL PRIMARY KEY,
       start TEXT,
-      end TEXT
+      "end" TEXT
     )`,
     `CREATE TABLE IF NOT EXISTS session_db.tool_table (
       id SERIAL PRIMARY KEY,
